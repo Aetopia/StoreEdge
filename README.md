@@ -34,4 +34,3 @@ Task<IEnumerable<IUpdateIdentity>> SyncUpdates(IProduct product)
     - [.NET Framework 4.8.1 Developer Pack](https://dotnet.microsoft.com/en-us/download/dotnet-framework/thank-you/net481-developer-pack-offline-installer)
 
 2. Run `dotnet publish` to compile.
-    - You can run `dotnet pack` to make a [NuGet](https://www.nuget.org/) package.
