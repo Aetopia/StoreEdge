@@ -118,7 +118,10 @@ public class Store
         List<IProduct> products = [];
         foreach (var productId in productIds)
         {
-            var payload = javaScriptSerializer.Deserialize<dynamic>(await httpClient.GetStringAsync(string.Format(requestUri, $"/{productId}")))["Payload"];
+            using var response = await httpClient.GetAsync(string.Format(requestUri, $"/{productId}"));
+            response.EnsureSuccessStatusCode();
+
+            var payload = javaScriptSerializer.Deserialize<dynamic>(await response.Content.ReadAsStringAsync())["Payload"];
             ((Dictionary<string, object>)payload).TryGetValue("ShortTitle", out object value);
 
             products.Add(new Product((string)(value ?? payload["Title"]), javaScriptSerializer.Deserialize<dynamic>(payload["Skus"][0]["FulfillmentData"])["WuCategoryId"]));
