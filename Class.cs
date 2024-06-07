@@ -14,6 +14,7 @@ using Windows.Management.Deployment;
 using System.Runtime.InteropServices;
 using System.Runtime.CompilerServices;
 using System.Web.Script.Serialization;
+using System.Collections;
 
 public interface IProduct
 {
@@ -118,10 +119,15 @@ public class Store
         List<IProduct> products = [];
         foreach (var productId in productIds)
         {
-            var payload = javaScriptSerializer.Deserialize<dynamic>(await httpClient.GetStringAsync(string.Format(requestUri, $"/{productId}")))["Payload"];
-            ((Dictionary<string, object>)payload).TryGetValue("ShortTitle", out object value);
+            using var response = await httpClient.GetAsync(string.Format(requestUri, $"/{productId}"));
+            response.EnsureSuccessStatusCode();
 
-            products.Add(new Product((string)(value ?? payload["Title"]), javaScriptSerializer.Deserialize<dynamic>(payload["Skus"][0]["FulfillmentData"])["WuCategoryId"]));
+            var payload = (Dictionary<string, object>)javaScriptSerializer.Deserialize<Dictionary<string, object>>(await response.Content.ReadAsStringAsync())["Payload"];
+            payload.TryGetValue("ShortTitle", out object value);
+
+            products.Add(
+                new Product((string)(string.IsNullOrEmpty((string)value) ? payload["Title"] : value),
+                javaScriptSerializer.Deserialize<Dictionary<string, string>>((string)((Dictionary<string, object>)((ArrayList)payload["Skus"])[0])["FulfillmentData"])["WuCategoryId"]));
         }
 
         return products;
@@ -131,7 +137,7 @@ public class Store
     {
         await default(UncapturedContext);
 
-        using StringContent content = new(javaScriptSerializer.Serialize(new Dictionary<dynamic, dynamic>()
+        using StringContent content = new(javaScriptSerializer.Serialize(new Dictionary<object, object>()
         {
             ["IdType"] = "PackageFamilyName",
             ["ProductIds"] = packageFamilyNames
@@ -140,8 +146,11 @@ public class Store
         content.Headers.ContentType = new("application/json");
         using var response = await httpClient.PostAsync(string.Format(requestUri, string.Empty), content);
 
-        return ((IEnumerable<dynamic>)javaScriptSerializer.Deserialize<dynamic>(
-            await response.Content.ReadAsStringAsync())["Payload"]["Products"]).Select(product => (string)product["ProductId"]);
+        List<string> productIds = [];
+        foreach (var product in (ArrayList)((Dictionary<string, object>)javaScriptSerializer.Deserialize<Dictionary<string, object>>(await response.Content.ReadAsStringAsync())["Payload"])["Products"])
+            productIds.Add((string)((Dictionary<string, object>)product)["ProductId"]);
+
+        return productIds;
     }
 
     public async Task<string> GetUrlAsync(IUpdateIdentity updateIdentity)
@@ -152,13 +161,13 @@ public class Store
             xmlNode => xmlNode.InnerText.StartsWith("http://tlu.dl.delivery.mp.microsoft.com")).InnerText;
     }
 
-    public async Task<IEnumerable<IUpdateIdentity>> SyncUpdates(IProduct product)
+    public async Task<IEnumerable<IUpdateIdentity>> SyncUpdatesAsync(IProduct product)
     {
         await default(UncapturedContext);
 
         var syncUpdatesResult = (XmlElement)(await PostAsSoapAsync(syncUpdates.Replace("{2}", product.AppCategoryId))).GetElementsByTagName("SyncUpdatesResult")[0];
+        
         Dictionary<string, Update> updates = [];
-
         foreach (XmlNode xmlNode in syncUpdatesResult.GetElementsByTagName("AppxPackageInstallData"))
         {
             var xmlElement = (XmlElement)xmlNode.ParentNode.ParentNode.ParentNode;
@@ -177,7 +186,7 @@ public class Store
             }
         }
 
-        List<UpdateIdentity> updateIdentities = [];
+        List<IUpdateIdentity> updateIdentities = [];
         foreach (XmlNode xmlNode in syncUpdatesResult.GetElementsByTagName("SecuredFragment"))
         {
             var xmlElement = (XmlElement)xmlNode.ParentNode.ParentNode.ParentNode;
@@ -185,11 +194,11 @@ public class Store
             if (update == null) continue;
 
             if (CheckUpdateAvailability(xmlElement.GetElementsByTagName("AppxMetadata")[0].Attributes["PackageMoniker"].InnerText))
-                updateIdentities.Add(new(xmlElement.GetElementsByTagName("UpdateIdentity")[0].Attributes["UpdateID"].InnerText, update.MainPackage));
+                updateIdentities.Add(new UpdateIdentity(xmlElement.GetElementsByTagName("UpdateIdentity")[0].Attributes["UpdateID"].InnerText, update.MainPackage));
             else if (update.MainPackage) return [];
         }
 
-        return (IEnumerable<IUpdateIdentity>)updateIdentities.OrderBy(updateIdentity => updateIdentity.MainPackage);
+        return updateIdentities.OrderBy(updateIdentity => ((UpdateIdentity)updateIdentity).MainPackage);
     }
 
     static async Task<XmlDocument> PostAsSoapAsync(string xml, bool secured = false)
@@ -211,7 +220,8 @@ public class Store
         var package = packageManager.FindPackagesForUser(string.Empty, $"{packageIdentity.First()}_{packageIdentity.Last()}").FirstOrDefault();
 
         return
-            !(package?.IsDevelopmentMode ?? false) &&
-            new Version(packageIdentity[1]) > new Version(package?.Id.Version.Major ?? 0, package?.Id.Version.Minor ?? 0, package?.Id.Version.Build ?? 0, package?.Id.Version.Revision ?? 0);
+            package == null ||
+            (!package.IsDevelopmentMode &&
+            new Version(packageIdentity[1]) > new Version(package.Id.Version.Major, package.Id.Version.Minor, package.Id.Version.Build, package.Id.Version.Revision));
     }
 }

@@ -24,7 +24,7 @@ Task<string> GetUrlAsync(IUpdateIdentity updateIdentity)
 - Obtains the download URL for the specified update identity.
 
 ```csharp
-Task<IEnumerable<IUpdateIdentity>> SyncUpdates(IProduct product)
+Task<IEnumerable<IUpdateIdentity>> SyncUpdatesAsync(IProduct product)
 ```
 - Synchronizes updates for the specified product.
 

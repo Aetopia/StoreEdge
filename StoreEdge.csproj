@@ -11,7 +11,7 @@
 
     <PackageId>StoreEdge</PackageId>
     <Title>StoreEdge</Title>
-    <Version>1.0.0.0</Version>
+    <Version>1.0.2.0</Version>
     <Description>A lightweight .NET Framework library for interacting with the Microsoft Store.</Description>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <GeneratePackageOnBuild>true</GeneratePackageOnBuild>
@@ -19,7 +19,7 @@
     <PackageLicenseFile>LICENSE</PackageLicenseFile>
     <RepositoryUrl>https://github.com/Aetopia/StoreEdge/</RepositoryUrl>
 
-    <AssemblyVersion>1.0.0.0</AssemblyVersion>
+    <AssemblyVersion>1.0.2.0</AssemblyVersion>
     <AssemblyTitle>StoreEdge</AssemblyTitle>
     <Product>StoreEdge</Product>
     <Copyright>Copyright (C) 2024</Copyright>
@@ -49,7 +49,6 @@
   <ItemGroup>
     <Reference Include="System.Net.Http" />
     <Reference Include="System.Web.Extensions" />
-    <Reference Include="Microsoft.CSharp" />
     <PackageReference Include="Microsoft.Windows.SDK.Contracts" Version="*" />
   </ItemGroup>
 </Project>
