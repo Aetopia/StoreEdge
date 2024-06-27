@@ -4,17 +4,19 @@ using System;
 using System.IO;
 using System.Xml;
 using System.Linq;
+using System.Text;
 using System.Net.Http;
-using System.Reflection;
 using System.Threading;
+using System.Reflection;
 using System.Threading.Tasks;
 using System.Collections.Generic;
 using Windows.System.UserProfile;
+using System.Collections.ObjectModel;
 using Windows.Management.Deployment;
 using System.Runtime.InteropServices;
 using System.Runtime.CompilerServices;
 using System.Web.Script.Serialization;
-using System.Collections;
+using System.Runtime.Serialization.Json;
 
 public interface IProduct
 {
@@ -23,10 +25,7 @@ public interface IProduct
     string AppCategoryId { get; }
 }
 
-public interface IUpdateIdentity
-{
-    string UpdateId { get; }
-}
+public interface IUpdate { string UpdateId { get; } }
 
 file struct Product(string title, string appCategoryId) : IProduct
 {
@@ -35,21 +34,19 @@ file struct Product(string title, string appCategoryId) : IProduct
     public readonly string AppCategoryId => appCategoryId;
 }
 
-file struct UpdateIdentity(string updateId, bool mainPackage) : IUpdateIdentity
+file class Update : IUpdate
 {
-    public readonly string UpdateId => updateId;
+    string updateId;
 
-    internal readonly bool MainPackage => mainPackage;
-}
-
-file class Update
-{
     internal string Id;
 
     internal DateTime Modified;
 
     internal bool MainPackage;
+
+    public string UpdateId { get { return updateId; } set { updateId = value; } }
 }
+
 
 file static class Resources
 {
@@ -68,22 +65,18 @@ file static class Resources
     }
 }
 
-file struct UncapturedContext : INotifyCompletion
+file struct SynchronizationContextRemover : INotifyCompletion
 {
     internal readonly bool IsCompleted => SynchronizationContext.Current == null;
 
     internal readonly void GetResult() { }
 
-    internal readonly UncapturedContext GetAwaiter() { return this; }
+    internal readonly SynchronizationContextRemover GetAwaiter() { return this; }
 
     public readonly void OnCompleted(Action continuation)
     {
         var syncContext = SynchronizationContext.Current;
-        try
-        {
-            SynchronizationContext.SetSynchronizationContext(null);
-            continuation();
-        }
+        try { SynchronizationContext.SetSynchronizationContext(null); continuation(); }
         finally { SynchronizationContext.SetSynchronizationContext(syncContext); }
     }
 }
@@ -97,7 +90,7 @@ public class Store
 
     static readonly string requestUri = $"https://storeedgefd.dsx.mp.microsoft.com/v9.0/products{{0}}?market={GlobalizationPreferences.HomeGeographicRegion}&locale=iv&deviceFamily=Windows.Desktop";
 
-    static readonly HttpClient httpClient = new() { BaseAddress = new("https://fe3.delivery.mp.microsoft.com/ClientWebService/client.asmx/") };
+    static readonly HttpClient client = new() { BaseAddress = new("https://fe3.delivery.mp.microsoft.com/ClientWebService/client.asmx/") };
 
     static readonly PackageManager packageManager = new();
 
@@ -107,121 +100,126 @@ public class Store
 
     public static async Task<Store> CreateAsync()
     {
-        await default(UncapturedContext);
+        await default(SynchronizationContextRemover);
 
         return new((await PostAsSoapAsync(Resources.GetCookie)).GetElementsByTagName("EncryptedData")[0].InnerText);
     }
 
-    public async Task<IEnumerable<IProduct>> GetProductsAsync(params string[] productIds)
+    public async Task<ReadOnlyCollection<IProduct>> GetProductsAsync(params string[] productIds)
     {
-        await default(UncapturedContext);
+        await default(SynchronizationContextRemover);
 
         List<IProduct> products = [];
         foreach (var productId in productIds)
         {
-            using var response = await httpClient.GetAsync(string.Format(requestUri, $"/{productId}"));
-            response.EnsureSuccessStatusCode();
+            using var message = await client.GetAsync(string.Format(requestUri, $"/{productId}"));
+            message.EnsureSuccessStatusCode();
 
-            var payload = (Dictionary<string, object>)javaScriptSerializer.Deserialize<Dictionary<string, object>>(await response.Content.ReadAsStringAsync())["Payload"];
-            payload.TryGetValue("ShortTitle", out object value);
+            var payload = Deserialize(await message.Content.ReadAsStringAsync())["Payload"];
+            var title = payload?["ShortTitle"]?.InnerText;
 
-            products.Add(
-                new Product((string)(string.IsNullOrEmpty((string)value) ? payload["Title"] : value),
-                javaScriptSerializer.Deserialize<Dictionary<string, string>>((string)((Dictionary<string, object>)((ArrayList)payload["Skus"])[0])["FulfillmentData"])["WuCategoryId"]));
+            products.Add(new Product(
+                string.IsNullOrEmpty(title) ? payload["Title"].InnerText : title,
+                Deserialize(payload.GetElementsByTagName("FulfillmentData")[0].InnerText)["WuCategoryId"].InnerText));
         }
 
-        return products;
+        return products.AsReadOnly();
     }
 
-    public async Task<IEnumerable<string>> GetPackageFamilyNamesAsync(params string[] packageFamilyNames)
+    public async Task<ReadOnlyCollection<string>> GetPackageFamilyNamesAsync(params string[] packageFamilyNames)
     {
-        await default(UncapturedContext);
+        await default(SynchronizationContextRemover);
 
         using StringContent content = new(javaScriptSerializer.Serialize(new Dictionary<object, object>()
         {
             ["IdType"] = "PackageFamilyName",
             ["ProductIds"] = packageFamilyNames
-        }));
+        }), Encoding.UTF8, "application/json");
 
-        content.Headers.ContentType = new("application/json");
-        using var response = await httpClient.PostAsync(string.Format(requestUri, string.Empty), content);
+        using var message = await client.PostAsync(string.Format(requestUri, string.Empty), content);
+        message.EnsureSuccessStatusCode();
 
-        List<string> productIds = [];
-        foreach (var product in (ArrayList)((Dictionary<string, object>)javaScriptSerializer.Deserialize<Dictionary<string, object>>(await response.Content.ReadAsStringAsync())["Payload"])["Products"])
-            productIds.Add((string)((Dictionary<string, object>)product)["ProductId"]);
-
-        return productIds;
+        return Deserialize(await message.Content.ReadAsStringAsync())
+        .GetElementsByTagName("ProductId")
+        .Cast<XmlElement>()
+        .Select(element => element.InnerText)
+        .ToList()
+        .AsReadOnly();
     }
 
-    public async Task<string> GetUrlAsync(IUpdateIdentity updateIdentity)
+    public async Task<string> GetUrlAsync(IUpdate update)
     {
-        await default(UncapturedContext);
+        await default(SynchronizationContextRemover);
 
-        return (await PostAsSoapAsync(Resources.GetExtendedUpdateInfo2.Replace("{1}", updateIdentity.UpdateId), true)).GetElementsByTagName("Url").Cast<XmlNode>().First(
-            xmlNode => xmlNode.InnerText.StartsWith("http://tlu.dl.delivery.mp.microsoft.com")).InnerText;
+        return (await PostAsSoapAsync(Resources.GetExtendedUpdateInfo2.Replace("{1}", update.UpdateId), true)).GetElementsByTagName("Url").Cast<XmlNode>().First(
+            node => node.InnerText.StartsWith("http://tlu.dl.delivery.mp.microsoft.com")).InnerText;
     }
 
-    public async Task<IEnumerable<IUpdateIdentity>> SyncUpdatesAsync(IProduct product)
+    public async Task<ReadOnlyCollection<IUpdate>> SyncUpdatesAsync(IProduct product)
     {
-        await default(UncapturedContext);
+        await default(SynchronizationContextRemover);
 
         var syncUpdatesResult = (XmlElement)(await PostAsSoapAsync(syncUpdates.Replace("{2}", product.AppCategoryId))).GetElementsByTagName("SyncUpdatesResult")[0];
-        
+
         Dictionary<string, Update> updates = [];
         foreach (XmlNode xmlNode in syncUpdatesResult.GetElementsByTagName("AppxPackageInstallData"))
         {
-            var xmlElement = (XmlElement)xmlNode.ParentNode.ParentNode.ParentNode;
-            var file = xmlElement.GetElementsByTagName("File")[0];
+            var element = (XmlElement)xmlNode.ParentNode.ParentNode.ParentNode;
+            var file = element.GetElementsByTagName("File")[0];
 
             var packageIdentity = file.Attributes["InstallerSpecificIdentifier"].InnerText.Split('_');
-            if (!string.Equals(packageIdentity[2], architecture) && !string.Equals(packageIdentity[2], "neutral")) continue;
+            if (!packageIdentity[2].Equals(architecture, StringComparison.OrdinalIgnoreCase) && !packageIdentity[2].Equals("neutral")) continue;
             if (!updates.ContainsKey(packageIdentity[0])) updates.Add(packageIdentity[0], new());
 
             var modified = Convert.ToDateTime(file.Attributes["Modified"].InnerText);
             if (updates[packageIdentity[0]].Modified < modified)
             {
-                updates[packageIdentity[0]].Id = xmlElement["ID"].InnerText;
+                updates[packageIdentity[0]].Id = element["ID"].InnerText;
                 updates[packageIdentity[0]].Modified = modified;
                 updates[packageIdentity[0]].MainPackage = xmlNode.Attributes["MainPackage"].InnerText == "true";
             }
         }
 
-        List<IUpdateIdentity> updateIdentities = [];
         foreach (XmlNode xmlNode in syncUpdatesResult.GetElementsByTagName("SecuredFragment"))
         {
-            var xmlElement = (XmlElement)xmlNode.ParentNode.ParentNode.ParentNode;
-            var update = updates.Values.FirstOrDefault(update => string.Equals(update.Id, xmlElement["ID"].InnerText));
-            if (update == null) continue;
+            var element = (XmlElement)xmlNode.ParentNode.ParentNode.ParentNode;
+            var update = updates.FirstOrDefault(update => update.Value.Id.Equals(element["ID"].InnerText));
+            if (update.Value == null) continue;
 
-            if (CheckUpdateAvailability(xmlElement.GetElementsByTagName("AppxMetadata")[0].Attributes["PackageMoniker"].InnerText))
-                updateIdentities.Add(new UpdateIdentity(xmlElement.GetElementsByTagName("UpdateIdentity")[0].Attributes["UpdateID"].InnerText, update.MainPackage));
-            else if (update.MainPackage) return [];
+            var packageIdentity = element.GetElementsByTagName("AppxMetadata")[0].Attributes["PackageMoniker"].InnerText.Split('_');
+            var package = packageManager.FindPackagesForUser(string.Empty, $"{packageIdentity.First()}_{packageIdentity.Last()}").FirstOrDefault();
+
+            if (package == null || (!package.IsDevelopmentMode && new Version(packageIdentity[1]) >
+                new Version(package.Id.Version.Major, package.Id.Version.Minor, package.Id.Version.Build, package.Id.Version.Revision)))
+                updates[update.Key].UpdateId = element.GetElementsByTagName("UpdateIdentity")[0].Attributes["UpdateID"].InnerText;
+            else if (update.Value.MainPackage) return new([]);
+            else updates.Remove(update.Key);
         }
 
-        return updateIdentities.OrderBy(updateIdentity => ((UpdateIdentity)updateIdentity).MainPackage);
+        return updates
+        .Select(update => update.Value)
+        .OrderBy(update => update.MainPackage)
+        .Cast<IUpdate>()
+        .ToList()
+        .AsReadOnly();
     }
 
-    static async Task<XmlDocument> PostAsSoapAsync(string xml, bool secured = false)
+    static XmlElement Deserialize(string input)
     {
-        using StringContent content = new(xml);
-        content.Headers.ContentType = new("application/soap+xml");
+        using var reader = JsonReaderWriterFactory.CreateJsonReader(Encoding.UTF8.GetBytes(input), XmlDictionaryReaderQuotas.Max);
+        XmlDocument xml = new();
+        xml.Load(reader);
+        return xml["root"];
+    }
 
-        using var response = await httpClient.PostAsync(secured ? "secured" : null, content);
+    static async Task<XmlDocument> PostAsSoapAsync(string value, bool secured = false)
+    {
+        using StringContent content = new(value, Encoding.UTF8, "application/soap+xml");
+        using var response = await client.PostAsync(secured ? "secured" : null, content);
         response.EnsureSuccessStatusCode();
 
-        XmlDocument xmlDocument = new();
-        xmlDocument.LoadXml((await response.Content.ReadAsStringAsync()).Replace("&lt;", "<").Replace("&gt;", ">"));
-        return xmlDocument;
-    }
-
-    static bool CheckUpdateAvailability(string packageFullName)
-    {
-        var packageIdentity = packageFullName.Split('_');
-        var package = packageManager.FindPackagesForUser(string.Empty, $"{packageIdentity.First()}_{packageIdentity.Last()}").FirstOrDefault();
-
-        return
-            package == null ||
-            (!package.IsDevelopmentMode &&
-            new Version(packageIdentity[1]) > new Version(package.Id.Version.Major, package.Id.Version.Minor, package.Id.Version.Build, package.Id.Version.Revision));
+        XmlDocument xml = new();
+        xml.LoadXml((await response.Content.ReadAsStringAsync()).Replace("&lt;", "<").Replace("&gt;", ">"));
+        return xml;
     }
 }
