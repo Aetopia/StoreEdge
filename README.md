@@ -4,29 +4,24 @@ A lightweight .NET Framework library for interacting with the Microsoft Store.
 ## Usage
 
 ```csharp
-Task<Store> CreateAsync()
-```
-- Create a new `Store` instance.
-
-```csharp
- Task<ReadOnlyCollection<IProduct>> GetProductsAsync(params string[] productIds)
+Task<ReadOnlyCollection<Product>> GetProductsAsync(params string[] productIds)
 ```
 - Obtains products for the specified product IDs.
 
 ```csharp
-Task<IReadOnlyCollection<string>> GetPackageFamilyNamesAsync(params string[] packageFamilyNames)
+Task<ReadOnlyCollection<string>> GetPackageFamilyNamesAsync(params string[] packageFamilyNames)
 ```
 - Obtains product IDs for the specified package family names.
 
 ```csharp
-Task<string> GetUrlAsync(IUpdate update)
+Task<string> GetUrlAsync(UpdateIdentity update)
 ```
 - Obtains the download URL for the specified update identity.
 
 ```csharp
-Task<ReadOnlyCollection<IUpdate>> SyncUpdatesAsync(IProduct product)
+Task<ReadOnlyCollection<UpdateIdentity>> GetUpdatesAsync(Product product)
 ```
-- Synchronizes updates for the specified product.
+- Gets updates for the specified product.
 
 ## Example
 ```csharp
@@ -38,27 +33,29 @@ static class Program
 {
     static async Task Main()
     {
-        // Connect to the Microsoft Store.
-        var store = await Store.CreateAsync();
-
         // Get product IDs from package family names.
-        var productIds = await store.GetPackageFamilyNamesAsync("Microsoft.MinecraftUWP_8wekyb3d8bbwe", "Microsoft.MinecraftWindowsBeta_8wekyb3d8bbwe");
+        var productIds = await Store.GetPackageFamilyNamesAsync(
+            "Microsoft.MinecraftUWP_8wekyb3d8bbwe",
+            "Microsoft.MinecraftWindowsBeta_8wekyb3d8bbwe");
 
         // Get product information from product IDs.
-        var products = await store.GetProductsAsync([.. productIds]);
+        var products = await Store.GetProductsAsync([.. productIds]);
 
         foreach (var product in products)
         {
+            // Verify if a product supports an installed operating system's architecture.
+            var supported = product.Architecture is not null;
+
             Console.WriteLine($"Title: {product.Title}");
-            Console.WriteLine($"App Category ID: {product.AppCategoryId}\n");
+            Console.WriteLine($"Supported: {supported}\n");
 
             // Get packages/updates for a product.
-            foreach (var update in await store.SyncUpdatesAsync(product))
+            foreach (var update in await Store.GetUpdatesAsync(product))
             {
                 // Get a url for a package/update.
-                var url = await store.GetUrlAsync(update);
+                var url = await Store.GetUrlAsync(update);
 
-                Console.WriteLine($"\tUpdate ID: {update.UpdateId}");
+                Console.WriteLine($"\tUpdate Hash Code: {update.GetHashCode()}");
                 Console.WriteLine($"\tUrl: {url}\n");
             }
         }

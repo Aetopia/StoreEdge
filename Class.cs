@@ -1,71 +1,37 @@
 namespace StoreEdge;
 
 using System;
-using System.IO;
 using System.Xml;
-using System.Linq;
 using System.Text;
+using System.Linq;
+using Windows.System;
 using System.Net.Http;
 using System.Threading;
-using System.Reflection;
 using System.Threading.Tasks;
-using System.Collections.Generic;
 using Windows.System.UserProfile;
+using System.Collections.Generic;
 using System.Collections.ObjectModel;
-using Windows.Management.Deployment;
 using System.Runtime.InteropServices;
-using System.Runtime.CompilerServices;
-using System.Web.Script.Serialization;
 using System.Runtime.Serialization.Json;
+using Windows.Management.Deployment;
+using System.Web.Script.Serialization;
+using System.Runtime.CompilerServices;
 
-public interface IProduct
+readonly struct Resources
 {
-    string Title { get; }
+    static readonly System.Reflection.Assembly assembly = System.Reflection.Assembly.GetExecutingAssembly();
 
-    string AppCategoryId { get; }
-}
+    internal static readonly string GetExtendedUpdateInfo2 = GetString("GetExtendedUpdateInfo2.xml");
 
-public interface IUpdate { string UpdateId { get; } }
-
-file struct Product(string title, string appCategoryId) : IProduct
-{
-    public readonly string Title => title;
-
-    public readonly string AppCategoryId => appCategoryId;
-}
-
-file class Update : IUpdate
-{
-    string updateId;
-
-    internal string Id;
-
-    internal DateTime Modified;
-
-    internal bool MainPackage;
-
-    public string UpdateId { get { return updateId; } set { updateId = value; } }
-}
-
-
-file static class Resources
-{
-    static readonly Assembly assembly = Assembly.GetExecutingAssembly();
-
-    internal readonly static string GetCookie = ToString("GetCookie.xml");
-
-    internal readonly static string GetExtendedUpdateInfo2 = ToString("GetExtendedUpdateInfo2.xml");
-
-    internal readonly static string SyncUpdates = ToString("SyncUpdates.xml");
-
-    static string ToString(string name)
+    internal static string GetString(string name)
     {
-        using StreamReader stream = new(assembly.GetManifestResourceStream(name));
-        return stream.ReadToEnd();
+        using var stream = assembly.GetManifestResourceStream(name);
+        using System.IO.StreamReader reader = new(stream);
+        return reader.ReadToEnd();
     }
 }
 
-file struct SynchronizationContextRemover : INotifyCompletion
+readonly struct SynchronizationContextRemover : INotifyCompletion
 {
     internal readonly bool IsCompleted => SynchronizationContext.Current == null;
 
@@ -81,56 +47,98 @@ file struct SynchronizationContextRemover : INotifyCompletion
     }
 }
 
-
-public class Store
+public sealed class Product
 {
-    readonly string syncUpdates;
+    internal Product(string title, string architecture, string appCategoryId)
+    {
+        Title = title;
+        Architecture = architecture;
+        AppCategoryId = appCategoryId;
+    }
 
-    static readonly JavaScriptSerializer javaScriptSerializer = new();
+    public readonly string Title;
 
-    static readonly string requestUri = $"https://storeedgefd.dsx.mp.microsoft.com/v9.0/products{{0}}?market={GlobalizationPreferences.HomeGeographicRegion}&locale=iv&deviceFamily=Windows.Desktop";
+    public readonly string Architecture;
+
+    internal readonly string AppCategoryId;
+}
+
+public sealed class UpdateIdentity
+{
+    internal UpdateIdentity(string updateId, string revisionNumber, bool mainPackage)
+    {
+        UpdateID = updateId;
+        RevisionNumber = revisionNumber;
+        MainPackage = mainPackage;
+    }
+
+    internal readonly string UpdateID;
+
+    internal readonly string RevisionNumber;
+
+    internal readonly bool MainPackage;
+}
+
+sealed class Update
+{
+    internal string ID;
+
+    internal DateTime Modified;
+
+    internal ProcessorArchitecture Architecture;
+
+    internal string PackageFamilyName;
+
+    internal string Version;
+
+    internal bool MainPackage;
+}
+
+public static class Store
+{
+    static string content;
+
+    static readonly JavaScriptSerializer serializer = new() { MaxJsonLength = int.MaxValue, RecursionLimit = int.MaxValue };
+
+    static readonly PackageManager manager = new();
 
     static readonly HttpClient client = new() { BaseAddress = new("https://fe3.delivery.mp.microsoft.com/ClientWebService/client.asmx/") };
 
-    static readonly PackageManager packageManager = new();
+    static readonly string requestUri = $"https://storeedgefd.dsx.mp.microsoft.com/v9.0/products{{0}}?market={GlobalizationPreferences.HomeGeographicRegion}&locale=iv&deviceFamily=Windows.Desktop";
 
-    static readonly string architecture = RuntimeInformation.OSArchitecture.ToString().ToLower();
-
-    Store(string encryptedData) { syncUpdates = Resources.SyncUpdates.Replace("{1}", encryptedData); }
-
-    public static async Task<Store> CreateAsync()
-    {
-        await default(SynchronizationContextRemover);
-
-        return new((await PostAsSoapAsync(Resources.GetCookie)).GetElementsByTagName("EncryptedData")[0].InnerText);
-    }
-
-    public async Task<ReadOnlyCollection<IProduct>> GetProductsAsync(params string[] productIds)
-    {
-        await default(SynchronizationContextRemover);
-
-        List<IProduct> products = [];
-        foreach (var productId in productIds)
+    static readonly ((string Native, string Compatible) OS, (ProcessorArchitecture Native, ProcessorArchitecture Compatible) Processor) architectures = (
+        (RuntimeInformation.OSArchitecture.ToString().ToLowerInvariant(), RuntimeInformation.OSArchitecture switch { Architecture.X64 => "x86", Architecture.Arm64 => "arm", _ => null }),
+        (RuntimeInformation.OSArchitecture switch
         {
-            using var message = await client.GetAsync(string.Format(requestUri, $"/{productId}"));
-            message.EnsureSuccessStatusCode();
+            Architecture.X86 => ProcessorArchitecture.X86,
+            Architecture.X64 => ProcessorArchitecture.X64,
+            Architecture.Arm => ProcessorArchitecture.Arm,
+            Architecture.Arm64 => ProcessorArchitecture.Arm64,
+            _ => ProcessorArchitecture.Unknown
+        },
+        RuntimeInformation.OSArchitecture switch
+        {
+            Architecture.X64 => ProcessorArchitecture.X86,
+            Architecture.Arm64 => ProcessorArchitecture.Arm,
+            _ => ProcessorArchitecture.Unknown
+        })
+    );
 
-            var payload = Deserialize(await message.Content.ReadAsStringAsync())["Payload"];
-            var title = payload?["ShortTitle"]?.InnerText;
-
-            products.Add(new Product(
-                string.IsNullOrEmpty(title) ? payload["Title"].InnerText : title,
-                Deserialize(payload.GetElementsByTagName("FulfillmentData")[0].InnerText)["WuCategoryId"].InnerText));
-        }
-
-        return products.AsReadOnly();
-    }
-
-    public async Task<ReadOnlyCollection<string>> GetPackageFamilyNamesAsync(params string[] packageFamilyNames)
+    public static async Task<string> GetUrlAsync(UpdateIdentity update)
     {
         await default(SynchronizationContextRemover);
 
-        using StringContent content = new(javaScriptSerializer.Serialize(new Dictionary<object, object>()
+        return (await PostAsSoapAsync(string.Format(Resources.GetExtendedUpdateInfo2, update.UpdateID, update.RevisionNumber), true))
+       .GetElementsByTagName("Url")
+       .Cast<XmlNode>()
+       .First(node => node.InnerText.StartsWith("http://tlu.dl.delivery.mp.microsoft.com", StringComparison.Ordinal)).InnerText;
+    }
+
+    public static async Task<ReadOnlyCollection<string>> GetPackageFamilyNamesAsync(params string[] packageFamilyNames)
+    {
+        await default(SynchronizationContextRemover);
+
+        using StringContent content = new(serializer.Serialize(new Dictionary<string, object>()
         {
             ["IdType"] = "PackageFamilyName",
             ["ProductIds"] = packageFamilyNames
@@ -139,87 +147,127 @@ public class Store
         using var message = await client.PostAsync(string.Format(requestUri, string.Empty), content);
         message.EnsureSuccessStatusCode();
 
-        return Deserialize(await message.Content.ReadAsStringAsync())
-        .GetElementsByTagName("ProductId")
-        .Cast<XmlElement>()
-        .Select(element => element.InnerText)
-        .ToList()
-        .AsReadOnly();
+        return new(Deserialize(await message.Content.ReadAsStringAsync()).GetElementsByTagName("ProductId").Cast<XmlNode>().Select(element => element.InnerText).ToArray());
     }
 
-    public async Task<string> GetUrlAsync(IUpdate update)
+    public static async Task<ReadOnlyCollection<Product>> GetProductsAsync(params string[] productIds)
     {
         await default(SynchronizationContextRemover);
 
-        return (await PostAsSoapAsync(Resources.GetExtendedUpdateInfo2.Replace("{1}", update.UpdateId), true)).GetElementsByTagName("Url").Cast<XmlNode>().First(
-            node => node.InnerText.StartsWith("http://tlu.dl.delivery.mp.microsoft.com")).InnerText;
-    }
+        Product[] products = new Product[productIds.Length];
 
-    public async Task<ReadOnlyCollection<IUpdate>> SyncUpdatesAsync(IProduct product)
-    {
-        await default(SynchronizationContextRemover);
-
-        var syncUpdatesResult = (XmlElement)(await PostAsSoapAsync(syncUpdates.Replace("{2}", product.AppCategoryId))).GetElementsByTagName("SyncUpdatesResult")[0];
-
-        Dictionary<string, Update> updates = [];
-        foreach (XmlNode xmlNode in syncUpdatesResult.GetElementsByTagName("AppxPackageInstallData"))
+        for (int i = 0; i < products.Length; i++)
         {
-            var element = (XmlElement)xmlNode.ParentNode.ParentNode.ParentNode;
+            var productId = productIds[i];
+
+            using var message = await client.GetAsync(string.Format(requestUri, $"/{productId}"));
+            message.EnsureSuccessStatusCode();
+
+            var payload = Deserialize(await message.Content.ReadAsStringAsync())["Payload"];
+            var title = payload?["ShortTitle"]?.InnerText;
+            var enumerable = payload["Platforms"].Cast<XmlNode>().Select(node => node.InnerText);
+
+            products[i] = new(
+                string.IsNullOrEmpty(title) ? payload["Title"].InnerText : title,
+                (enumerable.FirstOrDefault(item => item.Equals(architectures.OS.Native, StringComparison.OrdinalIgnoreCase)) ?? 
+                enumerable.FirstOrDefault(item => item.Equals(architectures.OS.Compatible, StringComparison.OrdinalIgnoreCase)))?.ToLowerInvariant(),
+                Deserialize(payload.GetElementsByTagName("FulfillmentData")[0].InnerText)["WuCategoryId"].InnerText
+            );
+        }
+
+        return new(products);
+    }
+
+    public static async Task<ReadOnlyCollection<UpdateIdentity>> GetUpdatesAsync(Product product)
+    {
+        await default(SynchronizationContextRemover);
+
+        if (product.Architecture is null) return new([]);
+        var result = (XmlElement)(await PostAsSoapAsync(
+            string.Format(
+                content ??= string.Format(Resources.GetString("SyncUpdates.xml"),
+                (await PostAsSoapAsync(Resources.GetString("GetCookie.xml"))).GetElementsByTagName("EncryptedData")[0].InnerText, "{0}"),
+                product.AppCategoryId)))
+            .GetElementsByTagName("SyncUpdatesResult")[0];
+
+        ProcessorArchitecture architecture;
+        Dictionary<string, Update> dictionary = [];
+        foreach (XmlNode node in result.GetElementsByTagName("AppxPackageInstallData"))
+        {
+            var element = (XmlElement)node.ParentNode.ParentNode.ParentNode;
             var file = element.GetElementsByTagName("File")[0];
 
-            var packageIdentity = file.Attributes["InstallerSpecificIdentifier"].InnerText.Split('_');
-            if (!packageIdentity[2].Equals(architecture, StringComparison.OrdinalIgnoreCase) && !packageIdentity[2].Equals("neutral")) continue;
-            if (!updates.ContainsKey(packageIdentity[0])) updates.Add(packageIdentity[0], new());
+            var identity = file.Attributes["InstallerSpecificIdentifier"].InnerText.Split('_');
+            var neutral = identity[2] == "neutral";
+            if (!neutral && identity[2] != architectures.OS.Native && identity[2] != architectures.OS.Compatible) continue;
+            if ((architecture = (neutral ? product.Architecture : identity[2]) switch
+            {
+                "x86" => ProcessorArchitecture.X86,
+                "x64" => ProcessorArchitecture.X64,
+                "arm" => ProcessorArchitecture.Arm,
+                "arm64" => ProcessorArchitecture.Arm64,
+                _ => ProcessorArchitecture.Unknown
+            }) == ProcessorArchitecture.Unknown) return new([]);
+
+            var key = $"{identity[0]}_{identity[2]}";
+            if (!dictionary.ContainsKey(key)) dictionary.Add(key, new()
+            {
+                Architecture = architecture,
+                PackageFamilyName = $"{identity[0]}_{identity[4]}",
+                Version = identity[1],
+                MainPackage = node.Attributes["MainPackage"].InnerText == "true"
+            });
 
             var modified = Convert.ToDateTime(file.Attributes["Modified"].InnerText);
-            if (updates[packageIdentity[0]].Modified < modified)
+            if (dictionary[key].Modified < modified)
             {
-                updates[packageIdentity[0]].Id = element["ID"].InnerText;
-                updates[packageIdentity[0]].Modified = modified;
-                updates[packageIdentity[0]].MainPackage = xmlNode.Attributes["MainPackage"].InnerText == "true";
+                dictionary[key].ID = element["ID"].InnerText;
+                dictionary[key].Modified = modified;
             }
         }
 
-        foreach (XmlNode xmlNode in syncUpdatesResult.GetElementsByTagName("SecuredFragment"))
+        var values = dictionary.Where(item => item.Value.MainPackage).Select(item => item.Value);
+        architecture = (values.FirstOrDefault(value => value.Architecture == architectures.Processor.Native) ?? values.FirstOrDefault(value => value.Architecture == architectures.Processor.Compatible)).Architecture;
+        var items = dictionary.Select(item => item.Value).Where(item => item.Architecture == architecture);
+        List<UpdateIdentity> updates = [];
+
+        foreach (XmlNode node in result.GetElementsByTagName("SecuredFragment"))
         {
-            var element = (XmlElement)xmlNode.ParentNode.ParentNode.ParentNode;
-            var update = updates.FirstOrDefault(update => update.Value.Id.Equals(element["ID"].InnerText));
-            if (update.Value == null) continue;
+            var element = (XmlElement)node.ParentNode.ParentNode.ParentNode;
+            var item = items.FirstOrDefault(item => item.ID == element["ID"].InnerText);
+            if (item is null) continue;
 
-            var packageIdentity = element.GetElementsByTagName("AppxMetadata")[0].Attributes["PackageMoniker"].InnerText.Split('_');
-            var package = packageManager.FindPackagesForUser(string.Empty, $"{packageIdentity.First()}_{packageIdentity.Last()}").FirstOrDefault();
-
-            if (package == null || (!package.IsDevelopmentMode && new Version(packageIdentity[1]) >
-                new Version(package.Id.Version.Major, package.Id.Version.Minor, package.Id.Version.Build, package.Id.Version.Revision)))
-                updates[update.Key].UpdateId = element.GetElementsByTagName("UpdateIdentity")[0].Attributes["UpdateID"].InnerText;
-            else if (update.Value.MainPackage) return new([]);
-            else updates.Remove(update.Key);
+            var packages = manager.FindPackagesForUser(string.Empty, item.PackageFamilyName);
+            var package = item.MainPackage ? packages.SingleOrDefault() : packages.FirstOrDefault(package => package.Id.Architecture == item.Architecture);
+            if (package is null || (!package.IsDevelopmentMode &&
+                new Version(item.Version) > new Version(package.Id.Version.Major, package.Id.Version.Minor, package.Id.Version.Build, package.Id.Version.Revision)))
+            {
+                var attributes = element.GetElementsByTagName("UpdateIdentity")[0].Attributes;
+                updates.Add(new(attributes["UpdateID"].InnerText, attributes["RevisionNumber"].InnerText, item.MainPackage));
+            }
+            else if (item.MainPackage) return new([]);
         }
 
-        return updates
-        .Select(update => update.Value)
-        .OrderBy(update => update.MainPackage)
-        .Cast<IUpdate>()
-        .ToList()
-        .AsReadOnly();
+        updates.Sort((x, y) => x.MainPackage ? 1 : -1);
+        return updates.AsReadOnly();
     }
 
     static XmlElement Deserialize(string input)
     {
         using var reader = JsonReaderWriterFactory.CreateJsonReader(Encoding.UTF8.GetBytes(input), XmlDictionaryReaderQuotas.Max);
-        XmlDocument xml = new();
-        xml.Load(reader);
-        return xml["root"];
+        XmlDocument document = new();
+        document.Load(reader);
+        return document["root"];
     }
 
-    static async Task<XmlDocument> PostAsSoapAsync(string value, bool secured = false)
+    static async Task<XmlDocument> PostAsSoapAsync(string _, bool secured = false)
     {
-        using StringContent content = new(value, Encoding.UTF8, "application/soap+xml");
-        using var response = await client.PostAsync(secured ? "secured" : null, content);
-        response.EnsureSuccessStatusCode();
+        using StringContent content = new(_, Encoding.UTF8, "application/soap+xml");
+        using var message = await client.PostAsync(secured ? "secured" : null, content);
+        message.EnsureSuccessStatusCode();
 
-        XmlDocument xml = new();
-        xml.LoadXml((await response.Content.ReadAsStringAsync()).Replace("&lt;", "<").Replace("&gt;", ">"));
-        return xml;
+        XmlDocument document = new();
+        document.LoadXml((await message.Content.ReadAsStringAsync()).Replace("&lt;", "<").Replace("&gt;", ">"));
+        return document;
     }
 }
