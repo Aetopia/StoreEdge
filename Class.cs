@@ -1,6 +1,7 @@
 namespace StoreEdge;
 
 using System;
+using System.IO;
 using System.Xml;
 using System.Text;
 using System.Linq;
@@ -26,7 +27,7 @@ readonly struct Resources
     internal static string GetString(string name)
     {
         using var stream = assembly.GetManifestResourceStream(name);
-        using System.IO.StreamReader reader = new(stream);
+        using StreamReader reader = new(stream);
         return reader.ReadToEnd();
     }
 }
@@ -169,7 +170,7 @@ public static class Store
 
             products[i] = new(
                 string.IsNullOrEmpty(title) ? payload["Title"].InnerText : title,
-                (enumerable.FirstOrDefault(item => item.Equals(architectures.OS.Native, StringComparison.OrdinalIgnoreCase)) ?? 
+                (enumerable.FirstOrDefault(item => item.Equals(architectures.OS.Native, StringComparison.OrdinalIgnoreCase)) ??
                 enumerable.FirstOrDefault(item => item.Equals(architectures.OS.Compatible, StringComparison.OrdinalIgnoreCase)))?.ToLowerInvariant(),
                 Deserialize(payload.GetElementsByTagName("FulfillmentData")[0].InnerText)["WuCategoryId"].InnerText
             );
@@ -196,18 +197,19 @@ public static class Store
         {
             var element = (XmlElement)node.ParentNode.ParentNode.ParentNode;
             var file = element.GetElementsByTagName("File")[0];
+            if (Path.GetExtension(file.Attributes["FileName"].InnerText).StartsWith(".e", StringComparison.Ordinal)) continue;
 
             var identity = file.Attributes["InstallerSpecificIdentifier"].InnerText.Split('_');
             var neutral = identity[2] == "neutral";
             if (!neutral && identity[2] != architectures.OS.Native && identity[2] != architectures.OS.Compatible) continue;
-            if ((architecture = (neutral ? product.Architecture : identity[2]) switch
+            architecture = (neutral ? product.Architecture : identity[2]) switch
             {
                 "x86" => ProcessorArchitecture.X86,
                 "x64" => ProcessorArchitecture.X64,
                 "arm" => ProcessorArchitecture.Arm,
                 "arm64" => ProcessorArchitecture.Arm64,
                 _ => ProcessorArchitecture.Unknown
-            }) == ProcessorArchitecture.Unknown) return new([]);
+            };
 
             var key = $"{identity[0]}_{identity[2]}";
             if (!dictionary.ContainsKey(key)) dictionary.Add(key, new()
