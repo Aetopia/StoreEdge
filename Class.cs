@@ -211,7 +211,7 @@ public static class Store
                 _ => ProcessorArchitecture.Unknown
             };
 
-            var key = $"{identity[0]}_{identity[2]}";
+            var key = identity[0] + identity[2];
             if (!dictionary.ContainsKey(key)) dictionary.Add(key, new()
             {
                 Architecture = architecture,
